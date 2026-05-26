@@ -1,0 +1,56 @@
+{
+  "seed": 0,
+  "device": "cuda:0",
+  "data": {
+    "image_path": "../SSGCC/HSI_data/xuzhou.mat",
+    "gt_path": "../SSGCC/HSI_data/xuzhou_gt.mat",
+    "image_key": null,
+    "gt_key": null,
+    "remove_background": true,
+    "standardize": true,
+    "pca_dim": 10
+  },
+  "superpixel": {
+    "n_segments": 1000,
+    "compactness": 10.0,
+    "patch_size": 7,
+    "spectral_neighbors": 50,
+    "context_neighbors": 50
+  },
+  "model": {
+    "hidden_dim": 256,
+    "latent_dim": 128,
+    "dropout": 0.2
+  },
+  "diffusion": {
+    "timesteps": 100,
+    "schedule": "cosine",
+    "time_emb_dim": 64,
+    "hidden_dim": 512,
+    "sample_steps": 0,
+    "offset_noise": 0.0,
+    "prototype_momentum": 0.5
+  },
+  "train": {
+    "epochs": 100,
+    "lr": 0.001,
+    "weight_decay": 0.0005,
+    "warmup_epochs": 10,
+    "cluster_interval": 1,
+    "eval_interval": 1,
+    "tau_confidence": 0.7,
+    "lambda_recon": 0.0001,
+    "lambda_cluster": 1.0,
+    "lambda_hard": 1.0,
+    "lambda_diff": 1.0,
+    "lambda_align": 1.0,
+    "lambda_consistency": 0.2,
+    "lambda_view": 0.2,
+    "hard_temperature": 0.5,
+    "hard_beta": 3.0
+  },
+  "output": {
+    "dir": "runs/xuzhou"
+  }
+}
+
