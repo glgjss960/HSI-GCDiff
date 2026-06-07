@@ -1,0 +1,92 @@
+{
+  "name": "salinas_proof",
+  "seed": 0,
+  "device": "cuda",
+  "n_clusters": 16,
+  "run": {
+    "output_dir": "runs/salinas_proof"
+  },
+  "data": {
+    "synthetic": false,
+    "standardize": true,
+    "views": [
+      {
+        "name": "hsi",
+        "path": "../Salines/Salinas_corrected.mat",
+        "key": "salinas_corrected",
+        "pca_dim": 15
+      }
+    ],
+    "gt_path": "../Salines/Salinas_gt.mat",
+    "gt_key": "salinas_gt"
+  },
+  "superpixel": {
+    "n_segments": 2700,
+    "compactness": 10.0,
+    "source_view": 0
+  },
+  "graph": {
+    "neighbors": 20,
+    "include_spatial_graph": true,
+    "graph_views": [
+      {
+        "name": "spectral_stats",
+        "source_view": 0,
+        "mode": "mean_std",
+        "neighbors": 20
+      },
+      {
+        "name": "context_patch",
+        "source_view": 0,
+        "mode": "center_patch",
+        "patch_size": 7,
+        "neighbors": 20
+      }
+    ]
+  },
+  "encoder": {
+    "hidden_dim": 256,
+    "latent_dim": 128,
+    "fusion": "mean",
+    "epochs": 200,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "consistency_weight": 0.05,
+    "dropout": 0.1,
+    "log_every": 25
+  },
+  "teacher": {
+    "backend": "python_etap_lite",
+    "n_anchors": 2700,
+    "k": 5,
+    "p_value": 0.5,
+    "gamma": 0.0001,
+    "lambda": 0.000001,
+    "strict_components": false
+  },
+  "target": {
+    "source_key": "z_fuse",
+    "assignment": "soft",
+    "min_confidence": 0.0
+  },
+  "denoiser": {
+    "source_key": "z_source",
+    "cond_key": "z_fuse",
+    "hidden_dim": 384,
+    "time_dim": 64,
+    "layers": 3,
+    "timesteps": 100,
+    "schedule": "linear",
+    "epochs": 1000,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "dropout": 0.1,
+    "min_weight": 0.05,
+    "confidence_power": 1.0,
+    "log_every": 100
+  },
+  "eval": {
+    "timesteps": [0, 10, 25, 50, 75],
+    "noise_seeds": [0, 1, 2, 3, 4]
+  }
+}

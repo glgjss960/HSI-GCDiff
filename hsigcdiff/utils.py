@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import random
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -9,15 +10,29 @@ import scipy.sparse as sp
 import torch
 
 
+def ensure_dir(path: str) -> str:
+    if path:
+        Path(path).mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_json(obj: Dict[str, Any], path: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
+
+
+def project_path(path: Optional[str], base_dir: Optional[str] = None) -> Optional[str]:
+    if path is None:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(base_dir or os.getcwd(), path))
 
 
 def seed_everything(seed: int) -> None:
@@ -36,19 +51,29 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def ensure_dir(path: str) -> str:
-    Path(path).mkdir(parents=True, exist_ok=True)
-    return path
+def save_pickle(obj: Any, path: str) -> None:
+    ensure_dir(os.path.dirname(path))
+    with open(path, "wb") as f:
+        pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_pickle(path: str) -> Any:
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
 
 def to_torch_sparse(matrix: sp.spmatrix, device: Optional[torch.device] = None) -> torch.Tensor:
     coo = matrix.tocoo().astype(np.float32)
     indices = torch.from_numpy(np.vstack([coo.row, coo.col]).astype(np.int64))
-    values = torch.from_numpy(coo.data)
+    values = torch.from_numpy(coo.data.astype(np.float32))
     tensor = torch.sparse_coo_tensor(indices, values, coo.shape).coalesce()
     if device is not None:
         tensor = tensor.to(device)
     return tensor
+
+
+def row_normalize_np(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    return x / np.maximum(x.sum(axis=1, keepdims=True), eps)
 
 
 def sparse_row_normalize(matrix: sp.spmatrix) -> sp.csr_matrix:
@@ -71,9 +96,6 @@ def add_self_loops(matrix: sp.spmatrix) -> sp.csr_matrix:
     return (matrix.tocsr() + sp.eye(matrix.shape[0], dtype=np.float32, format="csr")).tocsr()
 
 
-def project_path(path: str, base_dir: Optional[str] = None) -> str:
-    if os.path.isabs(path):
-        return path
-    base = base_dir or os.getcwd()
-    return os.path.abspath(os.path.join(base, path))
+def l2_normalize_np(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), eps)
 

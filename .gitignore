@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 runs/
+codex_runs/
+.pycache_codex/
 *.pt
-

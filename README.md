@@ -1,86 +1,177 @@
 # HSI-GCDiff
 
-Graph latent diffusion for unsupervised hyperspectral image pixel clustering.
+`HSI-GCDiff` is a clean proof-of-denoising protocol for unsupervised HSI pixel clustering. It rewrites the previous joint-training prototype into frozen stages:
 
-This implementation is a clean research prototype built from the ideas in:
+1. Build multi-view superpixel graphs.
+2. Train and freeze a multi-view graph encoder.
+3. Build and freeze an ETAP-style anchor teacher.
+4. Build and freeze the diffusion target latent.
+5. Train only the latent denoiser.
+6. Compare ETAP/source/fuse/target/noised/denoised with one evaluator.
 
-- SSGCC: HSI loading, superpixel clustering workflow, hard sample mining, pixel-level evaluation.
-- DiffGraph: source relation embedding to target semantic embedding latent diffusion.
-- SCD-MVC: cosine diffusion schedule, offset noise, adjacent-timestep consistency.
+The implementation is meant to test whether graph latent diffusion itself improves clustering after the graph encoder and teacher are fixed.
 
-The training target is unsupervised HSI pixel clustering. Ground-truth labels are only used for evaluation.
+## Code Layout
 
-## Project Layout
+- `hsigcdiff/data.py`: `.mat` loading, PCA/standardization, synthetic data.
+- `hsigcdiff/superpixels.py`: SLIC superpixels and superpixel feature aggregation.
+- `hsigcdiff/graph_builder.py`: spectral/context/spatial superpixel graph construction.
+- `hsigcdiff/encoder.py`: multi-view graph autoencoder and frozen `z_source/z_fuse`.
+- `hsigcdiff/etap_teacher.py`: ETAP-lite anchor indicator teacher, plus external `Final_Z/G_A` loading.
+- `hsigcdiff/target_builder.py`: frozen `z_target = Y_A P` from anchor assignment and graph latent prototypes.
+- `hsigcdiff/diffgraph_diffusion.py`: DiffGraph-style latent denoising objective.
+- `hsigcdiff/proof_protocol.py`: staged pipeline and metrics export.
+- `train.py`: command-line entry point.
 
-```text
-HSI-GCDiff/
-  configs/xuzhou.json        Example config
-  hsigcdiff/
-    data.py                  HSI .mat loading and preprocessing
-    superpixels.py           SLIC superpixels, features, multi-relation graphs
-    model.py                 Multi-relation GCN encoder and latent diffusion model
-    diffusion.py             Diffusion schedule, denoiser, sampling
-    losses.py                Reconstruction, clustering, hard contrast losses
-    clustering.py            KMeans, prototypes, confidence estimates
-    evaluation.py            Pixel-level clustering metrics
-    trainer.py               End-to-end training loop
-    smoke_test.py            Synthetic sanity test
-  train.py                   CLI entry
-```
+## Environment
 
-## Install
-
-```powershell
-cd D:\AINet\LLM\M-A-P\HSIGD\HSI-GCDiff
+```bash
+conda create -n hsigcdiff python=3.10 -y
+conda activate hsigcdiff
 pip install -r requirements.txt
 ```
 
-## Run A Smoke Test
+Run commands from this directory:
 
-```powershell
+```bash
+cd HSI-GCDiff
+```
+
+## Smoke Test
+
+```bash
 python -m hsigcdiff.smoke_test
 ```
 
-This uses a synthetic HSI cube and verifies the complete data, graph, model, diffusion, clustering, and evaluation path.
+This only verifies that the full pipeline runs. It does not validate HSI performance.
 
-## Run On Real HSI Data
+## Data Fields
 
-Edit `configs/xuzhou.json`:
+Each dataset config uses MATLAB arrays. Check keys with:
+
+```bash
+python -c "from hsigcdiff.data import mat_keys; print(mat_keys('../Salines/Salinas_corrected.mat'))"
+```
+
+Salinas uses:
+
+- image: `../Salines/Salinas_corrected.mat`, key `salinas_corrected`
+- GT: `../Salines/Salinas_gt.mat`, key `salinas_gt`
+
+MUUFL uses:
+
+- `../ETAP/data/MUUFL/HSI.mat`, key `HSI`
+- `../ETAP/data/MUUFL/LiDAR.mat`, key `LiDAR`
+- `../ETAP/data/MUUFL/gt.mat`, key `gt`
+
+Berlin follows the ETAP demo convention:
+
+- `data_HS_LR.mat`, key `data_HS_LR`
+- `data_SAR_HR.mat`, key `data_SAR_HR`
+- `TestImage.mat + TrainImage.mat` as GT
+
+MDAS follows the ETAP demo convention:
+
+- `MDAS-Sub1-HSI.mat`, key `Data_HSI`
+- `MDAS-Sub1-DSM.mat`, key `Data_DSM`
+- `MDAS-Sub1-GT.mat`, key `GT`
+
+The local workspace currently contains Salinas and MUUFL. Berlin and MDAS configs are templates; put the official files under the configured paths or edit the JSON paths.
+
+## Run A Dataset
+
+Full pipeline:
+
+```bash
+python train.py --config configs/proof/salinas.json --stage all --device cuda
+```
+
+Run stages manually:
+
+```bash
+python train.py --config configs/proof/salinas.json --stage build_graph --device cuda --force
+python train.py --config configs/proof/salinas.json --stage train_encoder --device cuda --force
+python train.py --config configs/proof/salinas.json --stage build_teacher --device cuda --force
+python train.py --config configs/proof/salinas.json --stage build_target --device cuda --force
+python train.py --config configs/proof/salinas.json --stage train_denoiser --device cuda --force
+python train.py --config configs/proof/salinas.json --stage eval --device cuda
+```
+
+Useful quick overrides:
+
+```bash
+python train.py --config configs/proof/salinas.json --stage all --device cuda --epochs 50 --denoise-epochs 200 --force
+```
+
+Outputs are written to `runs/<dataset>_proof/`:
+
+- `graph.pkl`, `graph_meta.json`
+- `encoder/embeddings.npz`
+- `teacher/teacher.npz`
+- `target/target.npz`
+- `denoiser/denoiser.pt`
+- `metrics.csv`
+- `config.effective.json`
+
+## How To Read `metrics.csv`
+
+Important rows:
+
+- `ETAP_hard`: hard anchor-propagated teacher clustering.
+- `Y_anchor`: soft anchor assignment argmax.
+- `z_source`: mean of per-view graph encoder latents.
+- `z_fuse`: frozen graph latent fusion.
+- `z_target`: frozen projected anchor-centroid target.
+- `z_noised`: `q(z_source, t)` before denoising.
+- `z_denoised`: denoiser prediction from the same noisy latent and timestep.
+
+Metrics:
+
+- `acc`/`oa`: clustering accuracy after Hungarian matching.
+- `kappa`: Cohen kappa after matching.
+- `nmi`, `ari`: label-invariant clustering metrics.
+- `purity`: cluster purity.
+- `gain_vs_source`, `gain_vs_fuse`: direct gain over frozen encoder baselines.
+
+The strongest proof is not just `z_denoised > z_source`. Check:
+
+1. For the same `t` and `noise_seed`, `z_denoised` should outperform `z_noised`.
+2. Averaged over noise seeds, `z_denoised` should outperform `z_source` and preferably `z_fuse`.
+3. `z_target` should be competitive; otherwise the teacher target is too weak.
+4. The denoiser loss should decrease while encoder/teacher/target artifacts stay unchanged.
+
+## Dataset Commands
+
+```bash
+python train.py --config configs/proof/salinas.json --stage all --device cuda
+python train.py --config configs/proof/muufl.json --stage all --device cuda
+python train.py --config configs/proof/berlin.json --stage all --device cuda
+python train.py --config configs/proof/mdas.json --stage all --device cuda
+```
+
+## Default Scale
+
+The defaults follow the scale used by the referenced HSI work:
+
+- Salinas: 2700 superpixels, 128-d latent, 256 encoder hidden, 384 denoiser hidden.
+- MUUFL: 200 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
+- Berlin: 155 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
+- MDAS: 235 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
+
+Use `fusion="mean"` for the first proof run. Attention or concat fusion can be added as an ablation after the denoising effect is established.
+
+## External ETAP Teacher
+
+The default `teacher.backend="python_etap_lite"` is an ETAP-inspired Python implementation. To use an exported official ETAP teacher, create an `.npz` with:
+
+- `Final_Z`: node-to-anchor assignment.
+- `G_A`: anchor-to-cluster indicator, or `anchor_labels`.
+
+Then set:
 
 ```json
-{
-  "data": {
-    "image_path": "../SSGCC/HSI_data/xuzhou.mat",
-    "gt_path": "../SSGCC/HSI_data/xuzhou_gt.mat"
-  }
+"teacher": {
+  "backend": "load_npz",
+  "path": "path/to/etap_teacher.npz"
 }
 ```
-
-Then run:
-
-```powershell
-python train.py --config configs/xuzhou.json
-```
-
-If your `.mat` file contains multiple arrays, set `image_key` and `gt_key` in the config.
-
-## Core Pipeline
-
-1. Standardize the HSI cube and optionally apply PCA.
-2. Generate SLIC superpixels on PCA-reduced bands.
-3. Build explicit multi-relation superpixel graphs:
-   - spectral kNN graph
-   - spatial adjacency graph
-   - context/patch kNN graph
-   - pixel-superpixel association for final label projection
-4. Encode each graph relation with a dedicated GCN branch.
-5. Fuse relation embeddings with attention.
-6. Build EMA teacher and prototype-corrected target embeddings.
-7. Train latent diffusion to denoise source relation embeddings toward semantic target embeddings.
-8. Train clustering with DEC-style KL, view consistency, reconstruction, and hard sample contrast.
-9. Cluster denoised superpixel embeddings and map labels back to pixels.
-
-## Notes
-
-The first version intentionally keeps dependencies simple and does not require DGL. The graph convolutions use normalized sparse adjacency matrices with `torch.sparse.mm`.
-
