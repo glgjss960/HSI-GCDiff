@@ -1,22 +1,24 @@
 import csv
 import os
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 import numpy as np
 import torch
 
 from .data import load_multiview_hsi, make_synthetic_multiview
-from .diffgraph_diffusion import GraphLatentDiffusion, denoise_embeddings, load_denoiser, train_denoiser
+from .diffgraph_diffusion import load_denoiser, sample_denoised_aux, train_denoiser
 from .encoder import train_encoder
 from .etap_teacher import build_etap_teacher, load_teacher, save_teacher
-from .evaluation import evaluate_assignment, evaluate_embedding, evaluate_superpixel_labels
+from .evaluation import evaluate_embedding
 from .graph_builder import GraphBundle, build_graph_bundle
+from .injection import residual_inject
 from .superpixels import build_superpixels
 from .target_builder import build_target, load_target, save_target
 from .utils import ensure_dir, load_json, load_pickle, project_path, save_json, save_pickle, seed_everything
 
 
-STAGES = ["build_graph", "train_encoder", "build_teacher", "build_target", "train_denoiser", "eval"]
+STAGES = ["build_graph", "train_encoder", "build_target", "train_denoiser", "eval"]
+OPTIONAL_STAGES = ["build_teacher"]
 
 
 def project_root() -> str:
@@ -34,8 +36,8 @@ def load_config(path: str, output_override: str = None, device_override: str = N
             data_cfg["gt_path"] = project_path(data_cfg["gt_path"], root)
         for gt_cfg in data_cfg.get("gt_paths", []):
             gt_cfg["path"] = project_path(gt_cfg["path"], root)
-        if cfg.get("teacher", {}).get("backend") == "load_npz":
-            cfg["teacher"]["path"] = project_path(cfg["teacher"]["path"], root)
+    if cfg.get("teacher", {}).get("backend") == "load_npz":
+        cfg["teacher"]["path"] = project_path(cfg["teacher"]["path"], root)
     run_cfg = cfg.setdefault("run", {})
     if output_override:
         run_cfg["output_dir"] = output_override
@@ -99,6 +101,9 @@ def stage_build_graph(cfg: Dict, force: bool = False) -> str:
             "n_nodes": graph.n_nodes,
             "n_views": graph.n_views,
             "view_names": [view.name for view in graph.views],
+            "roles": [view.role for view in graph.views],
+            "task_view_names": [view.name for view in graph.task_views],
+            "aux_view_names": [view.name for view in graph.aux_views],
             "feature_dims": [int(view.features.shape[1]) for view in graph.views],
             "n_classes": graph.superpixels.n_classes,
             "actual_superpixels": graph.superpixels.n_superpixels,
@@ -132,8 +137,8 @@ def stage_build_target(cfg: Dict, force: bool = False) -> str:
     if os.path.exists(p["target"]) and not force:
         return p["target"]
     embeddings = _load_npz_dict(p["embeddings"])
-    teacher = load_teacher(p["teacher"])
-    target = build_target(embeddings, teacher, cfg)
+    teacher = load_teacher(p["teacher"]) if cfg.get("target", {}).get("mode") == "anchor_proto" else None
+    target = build_target(embeddings, cfg, teacher=teacher)
     save_target(target, p["target_dir"])
     return p["target"]
 
@@ -148,107 +153,107 @@ def stage_train_denoiser(cfg: Dict, device: torch.device, force: bool = False) -
     return p["denoiser"]
 
 
-def _eval_embedding_row(graph: GraphBundle, method: str, embedding: np.ndarray, n_clusters: int, seed: int, **extra) -> Dict:
+def _eval_embedding_row(
+    graph: GraphBundle,
+    method: str,
+    embedding: np.ndarray,
+    n_clusters: int,
+    seed: int,
+    **extra,
+) -> Dict:
     row = {"method": method, **extra}
     row.update(evaluate_embedding(graph, embedding, n_clusters=n_clusters, seed=seed).to_dict())
     return row
-
-
-def _eval_noised_rows(
-    graph: GraphBundle,
-    embeddings: Dict[str, np.ndarray],
-    cfg: Dict,
-    t_values: Iterable[int],
-    noise_seeds: Iterable[int],
-    device: torch.device,
-) -> List[Dict]:
-    den_cfg = cfg.get("denoiser", {})
-    source_key = den_cfg.get("source_key", "z_source")
-    z_source = torch.from_numpy(np.asarray(embeddings[source_key], dtype=np.float32)).to(device)
-    diffusion = GraphLatentDiffusion(
-        timesteps=int(den_cfg.get("timesteps", 100)),
-        schedule=den_cfg.get("schedule", "linear"),
-        device=device,
-    )
-    n_clusters = int(cfg["n_clusters"])
-    rows = []
-    for noise_seed in noise_seeds:
-        generator = torch.Generator(device=device)
-        generator.manual_seed(int(noise_seed))
-        for t_value in t_values:
-            t_value = max(0, min(int(t_value), diffusion.timesteps - 1))
-            t = torch.full((z_source.shape[0],), t_value, dtype=torch.long, device=device)
-            if t_value == 0:
-                noise = torch.zeros_like(z_source)
-            else:
-                noise = torch.randn(z_source.shape, generator=generator, device=device)
-            with torch.no_grad():
-                z_t = diffusion.q_sample(z_source, t, noise).detach().cpu().numpy().astype(np.float32)
-            rows.append(
-                _eval_embedding_row(
-                    graph,
-                    method="z_noised",
-                    embedding=z_t,
-                    n_clusters=n_clusters,
-                    seed=int(cfg.get("seed", 0)),
-                    t=t_value,
-                    noise_seed=int(noise_seed),
-                )
-            )
-    return rows
 
 
 def stage_eval(cfg: Dict, device: torch.device) -> str:
     p = paths(cfg)
     graph: GraphBundle = load_pickle(p["graph"])
     embeddings = _load_npz_dict(p["embeddings"])
-    teacher = load_teacher(p["teacher"])
     target = load_target(p["target"])
     n_clusters = int(cfg.get("n_clusters") or graph.superpixels.n_classes)
     seed = int(cfg.get("seed", 0))
-    rows: List[Dict] = []
-
-    row = {"method": "ETAP_hard", "t": "", "noise_seed": ""}
-    row.update(evaluate_superpixel_labels(graph, teacher.y_hard).to_dict())
-    rows.append(row)
-    row = {"method": "Y_anchor", "t": "", "noise_seed": ""}
-    row.update(evaluate_assignment(graph, teacher.y_anchor).to_dict())
-    rows.append(row)
-    for key in sorted([k for k in embeddings if k.startswith("z_view_")]):
-        rows.append(_eval_embedding_row(graph, key, embeddings[key], n_clusters, seed, t="", noise_seed=""))
-    rows.append(_eval_embedding_row(graph, "z_source", embeddings["z_source"], n_clusters, seed, t="", noise_seed=""))
-    rows.append(_eval_embedding_row(graph, "z_fuse", embeddings["z_fuse"], n_clusters, seed, t="", noise_seed=""))
-    rows.append(_eval_embedding_row(graph, "z_target", target.z_target, n_clusters, seed, t="", noise_seed=""))
-
     eval_cfg = cfg.get("eval", {})
-    t_values = eval_cfg.get("timesteps", [0, 10, 25, 50])
-    noise_seeds = eval_cfg.get("noise_seeds", [0, 1, 2, 3, 4])
-    rows.extend(_eval_noised_rows(graph, embeddings, cfg, t_values, noise_seeds, device))
+    alphas = [float(a) for a in cfg.get("injection", {}).get("alphas", eval_cfg.get("alphas", [0, 0.05, 0.1, 0.2, 0.5, 1.0]))]
+    sampling_steps = [int(s) for s in eval_cfg.get("sampling_steps", [0, 10, 20])]
+    noise_seeds = [int(s) for s in eval_cfg.get("noise_seeds", [0, 1, 2, 3, 4])]
+    z_task = np.asarray(embeddings["z_task"], dtype=np.float32)
+    z_aux = np.asarray(embeddings["z_aux"], dtype=np.float32)
+
+    rows: List[Dict] = []
+    rows.append(_eval_embedding_row(graph, "z_task", z_task, n_clusters, seed, alpha="", sampling_steps="", noise_seed=""))
+    rows.append(_eval_embedding_row(graph, "z_aux", z_aux, n_clusters, seed, alpha="", sampling_steps="", noise_seed=""))
+    rows.append(_eval_embedding_row(graph, "z_target", target.z_target, n_clusters, seed, alpha="", sampling_steps="", noise_seed=""))
+    for key in sorted(k for k in embeddings if k.startswith("z_task_view_")):
+        rows.append(_eval_embedding_row(graph, key, embeddings[key], n_clusters, seed, alpha="", sampling_steps="", noise_seed=""))
+    for key in sorted(k for k in embeddings if k.startswith("z_aux_view_")):
+        rows.append(_eval_embedding_row(graph, key, embeddings[key], n_clusters, seed, alpha="", sampling_steps="", noise_seed=""))
+
+    raw_acc_by_alpha: Dict[float, float] = {}
+    for alpha in alphas:
+        z_raw = residual_inject(z_task, z_aux, alpha)
+        row = _eval_embedding_row(graph, "z_task_plus_raw_aux", z_raw, n_clusters, seed, alpha=alpha, sampling_steps="", noise_seed="")
+        raw_acc_by_alpha[alpha] = row["acc"]
+        rows.append(row)
+
     if os.path.exists(p["denoiser"]):
         denoiser = load_denoiser(p["denoiser"], device=device)
         for noise_seed in noise_seeds:
-            denoised = denoise_embeddings(denoiser, embeddings, cfg, t_values, int(noise_seed), device)
-            for t_value, z in denoised.items():
+            denoised_by_steps = sample_denoised_aux(denoiser, embeddings, cfg, sampling_steps, noise_seed, device)
+            for steps, z_diff in denoised_by_steps.items():
                 rows.append(
                     _eval_embedding_row(
                         graph,
-                        "z_denoised",
-                        z,
+                        "z_diff",
+                        z_diff,
                         n_clusters,
                         seed,
-                        t=t_value,
-                        noise_seed=int(noise_seed),
+                        alpha="",
+                        sampling_steps=steps,
+                        noise_seed=noise_seed,
                     )
                 )
+                for alpha in alphas:
+                    z_final = residual_inject(z_task, z_diff, alpha)
+                    rows.append(
+                        _eval_embedding_row(
+                            graph,
+                            "z_task_plus_denoised_aux",
+                            z_final,
+                            n_clusters,
+                            seed,
+                            alpha=alpha,
+                            sampling_steps=steps,
+                            noise_seed=noise_seed,
+                        )
+                    )
 
-    source_acc = next((row["acc"] for row in rows if row["method"] == "z_source"), float("nan"))
-    fuse_acc = next((row["acc"] for row in rows if row["method"] == "z_fuse"), float("nan"))
+    task_acc = next((row["acc"] for row in rows if row["method"] == "z_task"), float("nan"))
+    aux_acc = next((row["acc"] for row in rows if row["method"] == "z_aux"), float("nan"))
     for row in rows:
-        row["gain_vs_source"] = row["acc"] - source_acc if np.isfinite(row["acc"]) else float("nan")
-        row["gain_vs_fuse"] = row["acc"] - fuse_acc if np.isfinite(row["acc"]) else float("nan")
+        row["gain_vs_task"] = row["acc"] - task_acc if np.isfinite(row["acc"]) else float("nan")
+        row["gain_vs_aux"] = row["acc"] - aux_acc if np.isfinite(row["acc"]) else float("nan")
+        if row["method"] == "z_task_plus_denoised_aux" and row["alpha"] in raw_acc_by_alpha:
+            row["gain_vs_raw_aux_injection"] = row["acc"] - raw_acc_by_alpha[float(row["alpha"])]
+        else:
+            row["gain_vs_raw_aux_injection"] = ""
 
     ensure_dir(os.path.dirname(p["metrics"]))
-    fieldnames = ["method", "t", "noise_seed", "acc", "oa", "kappa", "nmi", "ari", "purity", "gain_vs_source", "gain_vs_fuse"]
+    fieldnames = [
+        "method",
+        "alpha",
+        "sampling_steps",
+        "noise_seed",
+        "acc",
+        "oa",
+        "kappa",
+        "nmi",
+        "ari",
+        "purity",
+        "gain_vs_task",
+        "gain_vs_aux",
+        "gain_vs_raw_aux_injection",
+    ]
     with open(p["metrics"], "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -257,7 +262,13 @@ def stage_eval(cfg: Dict, device: torch.device) -> str:
     return p["metrics"]
 
 
-def run_protocol(config_path: str, stage: str = "all", device: torch.device = torch.device("cpu"), force: bool = False, output_dir: str = None) -> Dict[str, str]:
+def run_protocol(
+    config_path: str,
+    stage: str = "all",
+    device: torch.device = torch.device("cpu"),
+    force: bool = False,
+    output_dir: str = None,
+) -> Dict[str, str]:
     cfg = load_config(config_path, output_override=output_dir, device_override=str(device))
     seed_everything(int(cfg.get("seed", 0)))
     ensure_dir(paths(cfg)["run"])
@@ -277,5 +288,6 @@ def run_protocol(config_path: str, stage: str = "all", device: torch.device = to
         elif name == "eval":
             stage_eval(cfg, device=device)
         else:
-            raise ValueError(f"Unknown stage '{name}'. Valid stages: all, {', '.join(STAGES)}")
+            valid = ", ".join(["all"] + STAGES + OPTIONAL_STAGES)
+            raise ValueError(f"Unknown stage '{name}'. Valid stages: {valid}")
     return paths(cfg)

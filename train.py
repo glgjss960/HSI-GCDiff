@@ -1,13 +1,13 @@
 import argparse
 
-from hsigcdiff.proof_protocol import STAGES, run_protocol
+from hsigcdiff.proof_protocol import OPTIONAL_STAGES, STAGES, run_protocol
 from hsigcdiff.utils import resolve_device
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HSI-GCDiff proof-of-denoising protocol")
     parser.add_argument("--config", required=True, help="Path to a JSON config.")
-    parser.add_argument("--stage", default="all", choices=["all"] + STAGES, help="Pipeline stage to run.")
+    parser.add_argument("--stage", default="all", choices=["all"] + STAGES + OPTIONAL_STAGES, help="Pipeline stage to run.")
     parser.add_argument("--device", default="cuda", help="cuda, cuda:0, or cpu.")
     parser.add_argument("--output", default=None, help="Override run.output_dir.")
     parser.add_argument("--force", action="store_true", help="Recompute a stage even if its artifact exists.")

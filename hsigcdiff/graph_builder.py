@@ -14,6 +14,7 @@ from .utils import add_self_loops, sparse_symmetric_normalize
 @dataclass
 class GraphView:
     name: str
+    role: str
     features: np.ndarray
     adjacency: sp.csr_matrix
 
@@ -30,6 +31,14 @@ class GraphBundle:
     @property
     def n_views(self) -> int:
         return len(self.views)
+
+    @property
+    def task_views(self) -> List[GraphView]:
+        return [view for view in self.views if view.role == "task"]
+
+    @property
+    def aux_views(self) -> List[GraphView]:
+        return [view for view in self.views if view.role == "aux"]
 
 
 def _standardize(x: np.ndarray) -> np.ndarray:
@@ -78,7 +87,7 @@ def build_graph_bundle(hsi: MultiViewHSIData, superpixels: SuperpixelData, confi
     if graph_cfgs is None:
         graph_cfgs = []
         for idx, view in enumerate(hsi.views):
-            graph_cfgs.append({"name": view.name, "source_view": idx, "mode": "mean_std_geo"})
+            graph_cfgs.append({"name": view.name, "role": "task" if idx == 0 else "aux", "source_view": idx, "mode": "mean_std_geo"})
 
     views = []
     for idx, cfg in enumerate(graph_cfgs):
@@ -102,10 +111,16 @@ def build_graph_bundle(hsi: MultiViewHSIData, superpixels: SuperpixelData, confi
             adj = _spatial_adjacency(superpixels.labels)
         else:
             adj = _knn_graph(feat, int(cfg.get("neighbors", config.get("neighbors", 20))))
-        views.append(GraphView(name=cfg.get("name", f"view{idx}"), features=feat, adjacency=adj))
+        role = cfg.get("role", "task" if idx == 0 else "aux")
+        if role not in {"task", "aux"}:
+            raise ValueError(f"Graph view role must be 'task' or 'aux', got {role!r}.")
+        views.append(GraphView(name=cfg.get("name", f"view{idx}"), role=role, features=feat, adjacency=adj))
 
     if config.get("include_spatial_graph", False):
         feat = _standardize(np.concatenate([superpixels.centroids, superpixels.area], axis=1))
-        views.append(GraphView(name="spatial", features=feat, adjacency=_spatial_adjacency(superpixels.labels)))
+        views.append(GraphView(name="spatial", role=config.get("spatial_role", "aux"), features=feat, adjacency=_spatial_adjacency(superpixels.labels)))
+    if not any(view.role == "task" for view in views):
+        raise ValueError("At least one graph view must have role='task'.")
+    if not any(view.role == "aux" for view in views):
+        raise ValueError("At least one graph view must have role='aux' for HSI-GCDiff v2.")
     return GraphBundle(views=views, superpixels=superpixels)
-

@@ -1,10 +1,10 @@
 {
-  "name": "synthetic_proof",
+  "name": "synthetic_proof_v2",
   "seed": 7,
   "device": "cpu",
   "n_clusters": 4,
   "run": {
-    "output_dir": "runs/synthetic_proof"
+    "output_dir": "runs/synthetic_proof_v2"
   },
   "data": {
     "synthetic": true,
@@ -19,62 +19,68 @@
   },
   "graph": {
     "neighbors": 8,
-    "include_spatial_graph": true,
     "graph_views": [
       {
         "name": "spectral_stats",
+        "role": "task",
         "source_view": 0,
         "mode": "mean_std",
         "neighbors": 8
       },
       {
         "name": "aux_stats",
+        "role": "aux",
         "source_view": 1,
         "mode": "mean_std",
         "neighbors": 8
+      },
+      {
+        "name": "spatial",
+        "role": "aux",
+        "source_view": 0,
+        "mode": "geometry",
+        "graph": "spatial"
       }
     ]
   },
   "encoder": {
-    "hidden_dim": 64,
+    "task_hidden_dim": 64,
+    "aux_hidden_dim": 64,
     "latent_dim": 32,
-    "fusion": "mean",
     "epochs": 10,
     "lr": 0.002,
     "weight_decay": 0.0001,
-    "consistency_weight": 0.05,
+    "adj_recon_weight": 0.05,
+    "aux_align_weight": 0.02,
     "dropout": 0.1,
     "log_every": 5
   },
-  "teacher": {
-    "backend": "python_etap_lite",
-    "n_anchors": 80,
-    "k": 5,
-    "strict_components": false
-  },
   "target": {
-    "source_key": "z_fuse",
-    "assignment": "soft",
-    "min_confidence": 0.0
+    "mode": "task",
+    "source_key": "z_task"
   },
   "denoiser": {
-    "source_key": "z_source",
-    "cond_key": "z_fuse",
+    "source_key": "z_aux",
+    "target_key": "z_target",
+    "condition": "none",
     "hidden_dim": 96,
     "time_dim": 32,
     "layers": 3,
     "timesteps": 20,
-    "schedule": "linear",
+    "sampling_steps": 10,
+    "noise_scale": 1.0,
     "epochs": 20,
     "lr": 0.002,
     "weight_decay": 0.0001,
     "dropout": 0.1,
     "min_weight": 0.05,
-    "confidence_power": 1.0,
     "log_every": 10
   },
+  "injection": {
+    "alphas": [0, 0.05, 0.1, 0.2, 0.5, 1.0]
+  },
   "eval": {
-    "timesteps": [0, 5, 10],
+    "sampling_steps": [0, 5, 10],
     "noise_seeds": [0, 1]
   }
 }

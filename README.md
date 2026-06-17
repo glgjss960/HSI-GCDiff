@@ -1,27 +1,54 @@
 # HSI-GCDiff
 
-`HSI-GCDiff` is a clean proof-of-denoising protocol for unsupervised HSI pixel clustering. It rewrites the previous joint-training prototype into frozen stages:
+`HSI-GCDiff` implements a minimal DiffGraph-style proof protocol for unsupervised HSI pixel clustering:
 
-1. Build multi-view superpixel graphs.
-2. Train and freeze a multi-view graph encoder.
-3. Build and freeze an ETAP-style anchor teacher.
-4. Build and freeze the diffusion target latent.
-5. Train only the latent denoiser.
-6. Compare ETAP/source/fuse/target/noised/denoised with one evaluator.
+```text
+z_task   = task graph encoder output
+z_aux    = auxiliary graph encoder output
+z_target = stopgrad(z_task)
+z_diff   = denoised auxiliary embedding learned from z_aux -> z_task
+z_final  = normalize(z_task + alpha * z_diff)
+```
 
-The implementation is meant to test whether graph latent diffusion itself improves clustering after the graph encoder and teacher are fixed.
+The core claim is tested by comparing:
 
-## Code Layout
+```text
+z_task + alpha * z_diff
+>
+z_task
+```
 
-- `hsigcdiff/data.py`: `.mat` loading, PCA/standardization, synthetic data.
-- `hsigcdiff/superpixels.py`: SLIC superpixels and superpixel feature aggregation.
-- `hsigcdiff/graph_builder.py`: spectral/context/spatial superpixel graph construction.
-- `hsigcdiff/encoder.py`: multi-view graph autoencoder and frozen `z_source/z_fuse`.
-- `hsigcdiff/etap_teacher.py`: ETAP-lite anchor indicator teacher, plus external `Final_Z/G_A` loading.
-- `hsigcdiff/target_builder.py`: frozen `z_target = Y_A P` from anchor assignment and graph latent prototypes.
-- `hsigcdiff/diffgraph_diffusion.py`: DiffGraph-style latent denoising objective.
-- `hsigcdiff/proof_protocol.py`: staged pipeline and metrics export.
-- `train.py`: command-line entry point.
+and, more importantly:
+
+```text
+z_task + alpha * z_diff
+>
+z_task + alpha * z_aux
+```
+
+The second comparison proves that denoising the auxiliary semantics is better than directly injecting raw auxiliary semantics.
+
+## Stages
+
+The default pipeline is strictly staged:
+
+```text
+build_graph
+train_encoder
+build_target
+train_denoiser
+eval
+```
+
+`all` runs these stages in order. Encoder artifacts are frozen before denoiser training. The denoiser optimizer only sees denoiser parameters.
+
+Optional:
+
+```text
+build_teacher
+```
+
+This is reserved for future anchor/prototype target ablations. The minimal protocol does not run it.
 
 ## Environment
 
@@ -29,11 +56,6 @@ The implementation is meant to test whether graph latent diffusion itself improv
 conda create -n hsigcdiff python=3.10 -y
 conda activate hsigcdiff
 pip install -r requirements.txt
-```
-
-Run commands from this directory:
-
-```bash
 cd HSI-GCDiff
 ```
 
@@ -43,135 +65,190 @@ cd HSI-GCDiff
 python -m hsigcdiff.smoke_test
 ```
 
-This only verifies that the full pipeline runs. It does not validate HSI performance.
+This checks that the staged v2 pipeline creates `z_task`, `z_aux`, `z_target`, `z_diff`, and injection metrics.
 
-## Data Fields
+## Run
 
-Each dataset config uses MATLAB arrays. Check keys with:
-
-```bash
-python -c "from hsigcdiff.data import mat_keys; print(mat_keys('../Salines/Salinas_corrected.mat'))"
-```
-
-Salinas uses:
-
-- image: `../Salines/Salinas_corrected.mat`, key `salinas_corrected`
-- GT: `../Salines/Salinas_gt.mat`, key `salinas_gt`
-
-MUUFL uses:
-
-- `../ETAP/data/MUUFL/HSI.mat`, key `HSI`
-- `../ETAP/data/MUUFL/LiDAR.mat`, key `LiDAR`
-- `../ETAP/data/MUUFL/gt.mat`, key `gt`
-
-Berlin follows the ETAP demo convention:
-
-- `data_HS_LR.mat`, key `data_HS_LR`
-- `data_SAR_HR.mat`, key `data_SAR_HR`
-- `TestImage.mat + TrainImage.mat` as GT
-
-MDAS follows the ETAP demo convention:
-
-- `MDAS-Sub1-HSI.mat`, key `Data_HSI`
-- `MDAS-Sub1-DSM.mat`, key `Data_DSM`
-- `MDAS-Sub1-GT.mat`, key `GT`
-
-The local workspace currently contains Salinas and MUUFL. Berlin and MDAS configs are templates; put the official files under the configured paths or edit the JSON paths.
-
-## Run A Dataset
-
-Full pipeline:
+Full Salinas run:
 
 ```bash
-python train.py --config configs/proof/salinas.json --stage all --device cuda
+python train.py --config configs/proof/salinas.json --stage all --device cuda --force
 ```
 
-Run stages manually:
+Manual stages:
 
 ```bash
 python train.py --config configs/proof/salinas.json --stage build_graph --device cuda --force
 python train.py --config configs/proof/salinas.json --stage train_encoder --device cuda --force
-python train.py --config configs/proof/salinas.json --stage build_teacher --device cuda --force
 python train.py --config configs/proof/salinas.json --stage build_target --device cuda --force
 python train.py --config configs/proof/salinas.json --stage train_denoiser --device cuda --force
 python train.py --config configs/proof/salinas.json --stage eval --device cuda
 ```
 
-Useful quick overrides:
+Quick debugging:
 
 ```bash
-python train.py --config configs/proof/salinas.json --stage all --device cuda --epochs 50 --denoise-epochs 200 --force
+python train.py --config configs/proof/synthetic.json --stage all --device cpu --epochs 3 --denoise-epochs 5 --force
 ```
 
-Outputs are written to `runs/<dataset>_proof/`:
-
-- `graph.pkl`, `graph_meta.json`
-- `encoder/embeddings.npz`
-- `teacher/teacher.npz`
-- `target/target.npz`
-- `denoiser/denoiser.pt`
-- `metrics.csv`
-- `config.effective.json`
-
-## How To Read `metrics.csv`
-
-Important rows:
-
-- `ETAP_hard`: hard anchor-propagated teacher clustering.
-- `Y_anchor`: soft anchor assignment argmax.
-- `z_source`: mean of per-view graph encoder latents.
-- `z_fuse`: frozen graph latent fusion.
-- `z_target`: frozen projected anchor-centroid target.
-- `z_noised`: `q(z_source, t)` before denoising.
-- `z_denoised`: denoiser prediction from the same noisy latent and timestep.
-
-Metrics:
-
-- `acc`/`oa`: clustering accuracy after Hungarian matching.
-- `kappa`: Cohen kappa after matching.
-- `nmi`, `ari`: label-invariant clustering metrics.
-- `purity`: cluster purity.
-- `gain_vs_source`, `gain_vs_fuse`: direct gain over frozen encoder baselines.
-
-The strongest proof is not just `z_denoised > z_source`. Check:
-
-1. For the same `t` and `noise_seed`, `z_denoised` should outperform `z_noised`.
-2. Averaged over noise seeds, `z_denoised` should outperform `z_source` and preferably `z_fuse`.
-3. `z_target` should be competitive; otherwise the teacher target is too weak.
-4. The denoiser loss should decrease while encoder/teacher/target artifacts stay unchanged.
-
-## Dataset Commands
+Dataset commands:
 
 ```bash
-python train.py --config configs/proof/salinas.json --stage all --device cuda
-python train.py --config configs/proof/muufl.json --stage all --device cuda
-python train.py --config configs/proof/berlin.json --stage all --device cuda
-python train.py --config configs/proof/mdas.json --stage all --device cuda
+python train.py --config configs/proof/salinas.json --stage all --device cuda --force
+python train.py --config configs/proof/muufl.json --stage all --device cuda --force
+python train.py --config configs/proof/berlin.json --stage all --device cuda --force
+python train.py --config configs/proof/mdas.json --stage all --device cuda --force
 ```
+
+The local workspace contains Salinas and MUUFL paths. Berlin and MDAS configs follow ETAP demo variable names and may require editing paths.
+
+## Graph Roles
+
+Each graph view has a role:
+
+```json
+{
+  "name": "spectral_stats",
+  "role": "task",
+  "mode": "mean_std"
+}
+```
+
+```json
+{
+  "name": "context_patch",
+  "role": "aux",
+  "mode": "center_patch"
+}
+```
+
+Salinas defaults:
+
+```text
+task: spectral_stats
+aux:  context_patch, spatial adjacency
+```
+
+MUUFL/Berlin/MDAS defaults:
+
+```text
+task: HSI spectral_stats
+aux:  LiDAR/SAR/DSM stats, spatial adjacency
+```
+
+## Outputs
+
+Run outputs are under `runs/<dataset>_proof_v2/`:
+
+```text
+graph.pkl
+graph_meta.json
+encoder/embeddings.npz
+target/target.npz
+denoiser/denoiser.pt
+metrics.csv
+config.effective.json
+```
+
+Important embeddings:
+
+```text
+z_task       frozen task embedding
+z_aux        frozen auxiliary embedding
+z_target     frozen stopgrad(z_task)
+z_diff       sampled denoised auxiliary embedding
+```
+
+Important metric rows:
+
+```text
+z_task
+z_aux
+z_target
+z_diff
+z_task_plus_raw_aux
+z_task_plus_denoised_aux
+```
+
+Important columns:
+
+```text
+alpha
+sampling_steps
+noise_seed
+acc / oa
+kappa
+nmi
+ari
+purity
+gain_vs_task
+gain_vs_raw_aux_injection
+```
+
+## How To Prove The Core Idea
+
+For each dataset, group `metrics.csv` by:
+
+```text
+method, alpha, sampling_steps
+```
+
+and average over `noise_seed`.
+
+The core idea is supported only if there exists a practical alpha, usually `0.05`, `0.1`, or `0.2`, such that:
+
+```text
+mean ACC(z_task_plus_denoised_aux) > ACC(z_task)
+```
+
+and:
+
+```text
+mean ACC(z_task_plus_denoised_aux)
+>
+ACC(z_task_plus_raw_aux with the same alpha)
+```
+
+Use `gain_vs_task` for the first condition and `gain_vs_raw_aux_injection` for the second.
+
+Report at least:
+
+```text
+ACC/OA
+Kappa
+NMI
+ARI
+Purity
+mean/std over noise_seed
+best alpha and sampling_steps
+```
+
+If `z_task_plus_raw_aux` is stronger than `z_task_plus_denoised_aux`, raw auxiliary fusion is enough and diffusion is not yet justified. If both are below `z_task`, the auxiliary graph or injection strength is hurting the task embedding.
 
 ## Default Scale
 
-The defaults follow the scale used by the referenced HSI work:
+Salinas:
 
-- Salinas: 2700 superpixels, 128-d latent, 256 encoder hidden, 384 denoiser hidden.
-- MUUFL: 200 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
-- Berlin: 155 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
-- MDAS: 235 superpixels/anchors, 128-d latent, 128 encoder hidden, 256 denoiser hidden.
-
-Use `fusion="mean"` for the first proof run. Attention or concat fusion can be added as an ablation after the denoising effect is established.
-
-## External ETAP Teacher
-
-The default `teacher.backend="python_etap_lite"` is an ETAP-inspired Python implementation. To use an exported official ETAP teacher, create an `.npz` with:
-
-- `Final_Z`: node-to-anchor assignment.
-- `G_A`: anchor-to-cluster indicator, or `anchor_labels`.
-
-Then set:
-
-```json
-"teacher": {
-  "backend": "load_npz",
-  "path": "path/to/etap_teacher.npz"
-}
+```text
+n_superpixels = 2700
+task_hidden_dim = 256
+aux_hidden_dim = 256
+latent_dim = 128
+denoiser_hidden_dim = 384
+diffusion_timesteps = 100
+sampling_steps = 10, 20, 30
 ```
+
+MUUFL/Berlin/MDAS:
+
+```text
+n_superpixels around 155-235
+task_hidden_dim = 128
+aux_hidden_dim = 128
+latent_dim = 128
+denoiser_hidden_dim = 256
+diffusion_timesteps = 100
+sampling_steps = 10, 20
+```
+
+These choices keep model size small for superpixel-level clustering while giving the denoiser enough capacity to map auxiliary relation semantics into the task embedding space.
